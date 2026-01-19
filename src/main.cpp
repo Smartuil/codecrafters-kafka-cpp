@@ -68,24 +68,42 @@ int main(int argc, char* argv[])
     char buffer[1024];
     ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
     
-    // Parse correlation_id from request header v2
+    // Parse request header v2
     // Request structure:
     //   message_size (4 bytes) + request_api_key (2 bytes) + request_api_version (2 bytes) + correlation_id (4 bytes)
+    
+    // request_api_version is at offset 6 (4 + 2)
+    int16_t request_api_version_net;
+    memcpy(&request_api_version_net, buffer + 6, sizeof(request_api_version_net));
+    int16_t request_api_version = ntohs(request_api_version_net);
+    
     // correlation_id is at offset 8 (4 + 2 + 2)
     int32_t correlation_id;
     memcpy(&correlation_id, buffer + 8, sizeof(correlation_id));
     // correlation_id is already in network byte order (big-endian), no conversion needed for echo
     
-    // Prepare response: 4 bytes message_size + 4 bytes correlation_id
+    // Determine error_code
+    // Supported ApiVersions: 0-4
+    // Error code 35 = UNSUPPORTED_VERSION
+    int16_t error_code = 0;
+    if (request_api_version < 0 || request_api_version > 4) {
+        error_code = 35;  // UNSUPPORTED_VERSION
+    }
+    
+    // Prepare response: message_size (4) + correlation_id (4) + error_code (2)
     int32_t message_size = htonl(0);  // message_size: 0 (any value works for this stage)
+    int16_t error_code_net = htons(error_code);
     
     // Send message_size
     send(client_fd, &message_size, sizeof(message_size), 0);
     // Send correlation_id (echo back as-is, already in network byte order)
     send(client_fd, &correlation_id, sizeof(correlation_id), 0);
+    // Send error_code
+    send(client_fd, &error_code_net, sizeof(error_code_net), 0);
     
     close(client_fd);
 
     close(server_fd);
+    
     return 0;
 }

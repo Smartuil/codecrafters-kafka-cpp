@@ -64,14 +64,24 @@ int main(int argc, char* argv[])
     int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len);
     std::cout << "Client connected\n";
     
+    // Read request from client
+    char buffer[1024];
+    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
+    
+    // Parse correlation_id from request header v2
+    // Request structure:
+    //   message_size (4 bytes) + request_api_key (2 bytes) + request_api_version (2 bytes) + correlation_id (4 bytes)
+    // correlation_id is at offset 8 (4 + 2 + 2)
+    int32_t correlation_id;
+    memcpy(&correlation_id, buffer + 8, sizeof(correlation_id));
+    // correlation_id is already in network byte order (big-endian), no conversion needed for echo
+    
     // Prepare response: 4 bytes message_size + 4 bytes correlation_id
-    // All integers in Kafka protocol are big-endian
-    int32_t message_size = htonl(0);      // message_size: 0 (any value works for this stage)
-    int32_t correlation_id = htonl(7);    // correlation_id: 7
+    int32_t message_size = htonl(0);  // message_size: 0 (any value works for this stage)
     
     // Send message_size
     send(client_fd, &message_size, sizeof(message_size), 0);
-    // Send correlation_id (header)
+    // Send correlation_id (echo back as-is, already in network byte order)
     send(client_fd, &correlation_id, sizeof(correlation_id), 0);
     
     close(client_fd);

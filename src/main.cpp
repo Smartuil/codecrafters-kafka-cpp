@@ -7,60 +7,11 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <thread>
 
-int main(int argc, char* argv[]) 
+// 处理单个客户端连接的函数
+void handle_client(int client_fd)
 {
-    // 禁用输出缓冲
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
-
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) 
-    {
-        std::cerr << "Failed to create server socket: " << std::endl;
-        return 1;
-    }
-
-    // 由于测试程序会频繁重启，设置 SO_REUSEADDR 避免 "Address already in use" 错误
-    int reuse = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) 
-    {
-        close(server_fd);
-        std::cerr << "setsockopt failed: " << std::endl;
-        return 1;
-    }
-
-    struct sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(9092);
-
-    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) != 0) 
-    {
-        close(server_fd);
-        std::cerr << "Failed to bind to port 9092" << std::endl;
-        return 1;
-    }
-
-    int connection_backlog = 5;
-    if (listen(server_fd, connection_backlog) != 0) 
-    {
-        close(server_fd);
-        std::cerr << "listen failed" << std::endl;
-        return 1;
-    }
-
-    std::cout << "Waiting for a client to connect...\n";
-
-    struct sockaddr_in client_addr{};
-    socklen_t client_addr_len = sizeof(client_addr);
-
-    // 调试信息会在运行测试时显示
-    std::cerr << "Logs from your program will appear here!\n";
-    
-    int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len);
-    std::cout << "Client connected\n";
-    
     // 循环处理同一连接上的多个请求
     while (true) 
     {
@@ -162,6 +113,74 @@ int main(int argc, char* argv[])
     }
     
     close(client_fd);
+}
+
+int main(int argc, char* argv[]) 
+{
+    // 禁用输出缓冲
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) 
+    {
+        std::cerr << "Failed to create server socket: " << std::endl;
+        return 1;
+    }
+
+    // 由于测试程序会频繁重启，设置 SO_REUSEADDR 避免 "Address already in use" 错误
+    int reuse = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) 
+    {
+        close(server_fd);
+        std::cerr << "setsockopt failed: " << std::endl;
+        return 1;
+    }
+
+    struct sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(9092);
+
+    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) != 0) 
+    {
+        close(server_fd);
+        std::cerr << "Failed to bind to port 9092" << std::endl;
+        return 1;
+    }
+
+    int connection_backlog = 5;
+    if (listen(server_fd, connection_backlog) != 0) 
+    {
+        close(server_fd);
+        std::cerr << "listen failed" << std::endl;
+        return 1;
+    }
+
+    std::cout << "Waiting for a client to connect...\n";
+
+    // 调试信息会在运行测试时显示
+    std::cerr << "Logs from your program will appear here!\n";
+    
+    // 主循环：接受多个客户端连接
+    while (true)
+    {
+        struct sockaddr_in client_addr{};
+        socklen_t client_addr_len = sizeof(client_addr);
+        
+        int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len);
+        if (client_fd < 0)
+        {
+            std::cerr << "accept failed" << std::endl;
+            continue;
+        }
+        
+        std::cout << "Client connected\n";
+        
+        // 为每个客户端创建一个新线程处理
+        std::thread client_thread(handle_client, client_fd);
+        client_thread.detach();  // 分离线程，让它独立运行
+    }
 
     close(server_fd);
     

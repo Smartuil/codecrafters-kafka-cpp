@@ -8,13 +8,15 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) 
+{
     // Disable output buffering
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
+    if (server_fd < 0) 
+    {
         std::cerr << "Failed to create server socket: " << std::endl;
         return 1;
     }
@@ -22,7 +24,8 @@ int main(int argc, char* argv[]) {
     // Since the tester restarts your program quite often, setting SO_REUSEADDR
     // ensures that we don't run into 'Address already in use' errors
     int reuse = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) 
+    {
         close(server_fd);
         std::cerr << "setsockopt failed: " << std::endl;
         return 1;
@@ -33,14 +36,16 @@ int main(int argc, char* argv[]) {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(9092);
 
-    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) != 0) {
+    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) != 0) 
+    {
         close(server_fd);
         std::cerr << "Failed to bind to port 9092" << std::endl;
         return 1;
     }
 
     int connection_backlog = 5;
-    if (listen(server_fd, connection_backlog) != 0) {
+    if (listen(server_fd, connection_backlog) != 0) 
+    {
         close(server_fd);
         std::cerr << "listen failed" << std::endl;
         return 1;
@@ -58,6 +63,17 @@ int main(int argc, char* argv[]) {
     
     int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len);
     std::cout << "Client connected\n";
+    
+    // Prepare response: 4 bytes message_size + 4 bytes correlation_id
+    // All integers in Kafka protocol are big-endian
+    int32_t message_size = htonl(0);      // message_size: 0 (any value works for this stage)
+    int32_t correlation_id = htonl(7);    // correlation_id: 7
+    
+    // Send message_size
+    send(client_fd, &message_size, sizeof(message_size), 0);
+    // Send correlation_id (header)
+    send(client_fd, &correlation_id, sizeof(correlation_id), 0);
+    
     close(client_fd);
 
     close(server_fd);

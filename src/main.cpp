@@ -55,10 +55,10 @@ int main(int argc, char* argv[]) {
     std::cerr << "Logs from your program will appear here!\n";
     
     // TODO: Uncomment the code below to pass the first stage
-    // 
-    // int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len);
-    // std::cout << "Client connected\n";
-    // close(client_fd);
+    
+    int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len);
+    std::cout << "Client connected\n";
+    close(client_fd);
 
     close(server_fd);
     return 0;

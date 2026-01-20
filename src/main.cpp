@@ -11,6 +11,7 @@
 #include <fstream>
 #include <vector>
 #include <map>
+#include <algorithm>
 
 // Topic 信息结构
 struct TopicInfo
@@ -358,7 +359,7 @@ void handle_api_versions(int client_fd, int32_t correlation_id, int16_t request_
 // 处理 DescribeTopicPartitions 请求
 void handle_describe_topic_partitions(int client_fd, int32_t correlation_id, char* buffer, ssize_t bytes_read)
 {
-    // 解析请求体，获取 topic_name
+    // 解析请求体，获取多个 topic_name
     // 请求头 v2 结构:
     //   message_size (4) + api_key (2) + api_version (2) + correlation_id (4) 
     //   + client_id (NULLABLE_STRING: 2字节长度 + 内容) + TAG_BUFFER
@@ -387,33 +388,28 @@ void handle_describe_topic_partitions(int client_fd, int32_t correlation_id, cha
     req_offset += 1;
     int num_topics = topics_array_len - 1;
     
-    // 读取第一个 topic 的 name (COMPACT_STRING)
-    uint8_t topic_name_len_encoded = static_cast<uint8_t>(buffer[req_offset]);
-    req_offset += 1;
-    int topic_name_len = topic_name_len_encoded - 1;  // 实际长度
-    
-    std::string topic_name(buffer + req_offset, topic_name_len);
-    
-    // 查找 topic 是否存在
-    bool topic_exists = false;
-    TopicInfo* topic_info = nullptr;
-    std::vector<PartitionInfo>* partitions = nullptr;
-    
-    auto it = g_topics.find(topic_name);
-    if (it != g_topics.end() && it->second.found)
+    // 读取所有请求的 topic names
+    std::vector<std::string> requested_topics;
+    for (int i = 0; i < num_topics; i++)
     {
-        topic_exists = true;
-        topic_info = &it->second;
-        std::string uuid_hex = uuid_to_hex(topic_info->uuid);
-        auto pit = g_partitions.find(uuid_hex);
-        if (pit != g_partitions.end())
-        {
-            partitions = &pit->second;
-        }
+        // 读取 topic name (COMPACT_STRING)
+        uint8_t topic_name_len_encoded = static_cast<uint8_t>(buffer[req_offset]);
+        req_offset += 1;
+        int topic_name_len = topic_name_len_encoded - 1;  // 实际长度
+        
+        std::string topic_name(buffer + req_offset, topic_name_len);
+        requested_topics.push_back(topic_name);
+        req_offset += topic_name_len;
+        
+        // 跳过 topic 条目的 TAG_BUFFER
+        req_offset += 1;
     }
     
+    // 按字母顺序排序
+    std::sort(requested_topics.begin(), requested_topics.end());
+    
     // 构建响应
-    char response[1024];
+    char response[4096];  // 增大缓冲区以支持多个 topic
     int offset = 0;
     
     // 先跳过 message_size (4字节)，最后再填充
@@ -433,124 +429,146 @@ void handle_describe_topic_partitions(int client_fd, int32_t correlation_id, cha
     memcpy(response + offset, &throttle_time_ms, 4);
     offset += 4;
     
-    // topics COMPACT_ARRAY: 1 个元素，长度 = 1 + 1 = 2
-    response[offset++] = 2;
+    // topics COMPACT_ARRAY: N 个元素，长度 = N + 1
+    response[offset++] = static_cast<uint8_t>(num_topics + 1);
     
-    if (topic_exists && topic_info)
+    // 为每个 topic 构建响应条目
+    for (const auto& topic_name : requested_topics)
     {
-        // Topic 存在
-        // error_code (2字节) - 0 = NO_ERROR
-        int16_t error_code = htons(0);
-        memcpy(response + offset, &error_code, 2);
-        offset += 2;
+        // 查找 topic 是否存在
+        bool topic_exists = false;
+        TopicInfo* topic_info = nullptr;
+        std::vector<PartitionInfo>* partitions = nullptr;
         
-        // topic_name COMPACT_STRING
-        response[offset++] = static_cast<uint8_t>(topic_name_len + 1);
-        memcpy(response + offset, topic_name.c_str(), topic_name_len);
-        offset += topic_name_len;
-        
-        // topic_id UUID (16字节) - 从元数据获取
-        memcpy(response + offset, topic_info->uuid, 16);
-        offset += 16;
-        
-        // is_internal BOOLEAN (1字节) - false
-        response[offset++] = 0;
-        
-        // partitions COMPACT_ARRAY
-        if (partitions && !partitions->empty())
+        auto it = g_topics.find(topic_name);
+        if (it != g_topics.end() && it->second.found)
         {
-            response[offset++] = static_cast<uint8_t>(partitions->size() + 1);
-            
-            for (const auto& part : *partitions)
+            topic_exists = true;
+            topic_info = &it->second;
+            std::string uuid_hex = uuid_to_hex(topic_info->uuid);
+            auto pit = g_partitions.find(uuid_hex);
+            if (pit != g_partitions.end())
             {
-                // error_code (2字节) - 0
-                int16_t part_error = htons(0);
-                memcpy(response + offset, &part_error, 2);
-                offset += 2;
+                partitions = &pit->second;
+            }
+        }
+        
+        if (topic_exists && topic_info)
+        {
+            // Topic 存在
+            // error_code (2字节) - 0 = NO_ERROR
+            int16_t error_code = htons(0);
+            memcpy(response + offset, &error_code, 2);
+            offset += 2;
+            
+            // topic_name COMPACT_STRING
+            response[offset++] = static_cast<uint8_t>(topic_name.size() + 1);
+            memcpy(response + offset, topic_name.c_str(), topic_name.size());
+            offset += topic_name.size();
+            
+            // topic_id UUID (16字节) - 从元数据获取
+            memcpy(response + offset, topic_info->uuid, 16);
+            offset += 16;
+            
+            // is_internal BOOLEAN (1字节) - false
+            response[offset++] = 0;
+            
+            // partitions COMPACT_ARRAY
+            if (partitions && !partitions->empty())
+            {
+                response[offset++] = static_cast<uint8_t>(partitions->size() + 1);
                 
-                // partition_index (4字节)
-                int32_t part_idx = htonl(part.partition_index);
-                memcpy(response + offset, &part_idx, 4);
-                offset += 4;
-                
-                // leader_id (4字节)
-                int32_t leader = htonl(part.leader_id);
-                memcpy(response + offset, &leader, 4);
-                offset += 4;
-                
-                // leader_epoch (4字节)
-                int32_t epoch = htonl(part.leader_epoch);
-                memcpy(response + offset, &epoch, 4);
-                offset += 4;
-                
-                // replica_nodes COMPACT_ARRAY
-                response[offset++] = static_cast<uint8_t>(part.replica_nodes.size() + 1);
-                for (int32_t replica : part.replica_nodes)
+                for (const auto& part : *partitions)
                 {
-                    int32_t rep = htonl(replica);
-                    memcpy(response + offset, &rep, 4);
+                    // error_code (2字节) - 0
+                    int16_t part_error = htons(0);
+                    memcpy(response + offset, &part_error, 2);
+                    offset += 2;
+                    
+                    // partition_index (4字节)
+                    int32_t part_idx = htonl(part.partition_index);
+                    memcpy(response + offset, &part_idx, 4);
                     offset += 4;
-                }
-                
-                // isr_nodes COMPACT_ARRAY (same as replicas for simplicity)
-                response[offset++] = static_cast<uint8_t>(part.replica_nodes.size() + 1);
-                for (int32_t replica : part.replica_nodes)
-                {
-                    int32_t rep = htonl(replica);
-                    memcpy(response + offset, &rep, 4);
+                    
+                    // leader_id (4字节)
+                    int32_t leader = htonl(part.leader_id);
+                    memcpy(response + offset, &leader, 4);
                     offset += 4;
+                    
+                    // leader_epoch (4字节)
+                    int32_t epoch = htonl(part.leader_epoch);
+                    memcpy(response + offset, &epoch, 4);
+                    offset += 4;
+                    
+                    // replica_nodes COMPACT_ARRAY
+                    response[offset++] = static_cast<uint8_t>(part.replica_nodes.size() + 1);
+                    for (int32_t replica : part.replica_nodes)
+                    {
+                        int32_t rep = htonl(replica);
+                        memcpy(response + offset, &rep, 4);
+                        offset += 4;
+                    }
+                    
+                    // isr_nodes COMPACT_ARRAY (same as replicas for simplicity)
+                    response[offset++] = static_cast<uint8_t>(part.replica_nodes.size() + 1);
+                    for (int32_t replica : part.replica_nodes)
+                    {
+                        int32_t rep = htonl(replica);
+                        memcpy(response + offset, &rep, 4);
+                        offset += 4;
+                    }
+                    
+                    // eligible_leader_replicas COMPACT_ARRAY - 空
+                    response[offset++] = 1;
+                    
+                    // last_known_elr COMPACT_ARRAY - 空
+                    response[offset++] = 1;
+                    
+                    // offline_replicas COMPACT_ARRAY - 空
+                    response[offset++] = 1;
+                    
+                    // TAG_BUFFER（空）- partition 条目
+                    response[offset++] = 0;
                 }
-                
-                // eligible_leader_replicas COMPACT_ARRAY - 空
-                response[offset++] = 1;
-                
-                // last_known_elr COMPACT_ARRAY - 空
-                response[offset++] = 1;
-                
-                // offline_replicas COMPACT_ARRAY - 空
-                response[offset++] = 1;
-                
-                // TAG_BUFFER（空）- partition 条目
-                response[offset++] = 0;
+            }
+            else
+            {
+                // 没有 partition 信息
+                response[offset++] = 1;  // 空数组
             }
         }
         else
         {
-            // 没有 partition 信息
-            response[offset++] = 1;  // 空数组
+            // Topic 不存在
+            // error_code (2字节) - 3 = UNKNOWN_TOPIC_OR_PARTITION
+            int16_t error_code = htons(3);
+            memcpy(response + offset, &error_code, 2);
+            offset += 2;
+            
+            // topic_name COMPACT_STRING
+            response[offset++] = static_cast<uint8_t>(topic_name.size() + 1);
+            memcpy(response + offset, topic_name.c_str(), topic_name.size());
+            offset += topic_name.size();
+            
+            // topic_id UUID (16字节) - 全零
+            memset(response + offset, 0, 16);
+            offset += 16;
+            
+            // is_internal BOOLEAN (1字节) - false
+            response[offset++] = 0;
+            
+            // partitions COMPACT_ARRAY - 空数组
+            response[offset++] = 1;
         }
-    }
-    else
-    {
-        // Topic 不存在
-        // error_code (2字节) - 3 = UNKNOWN_TOPIC_OR_PARTITION
-        int16_t error_code = htons(3);
-        memcpy(response + offset, &error_code, 2);
-        offset += 2;
         
-        // topic_name COMPACT_STRING
-        response[offset++] = static_cast<uint8_t>(topic_name_len + 1);
-        memcpy(response + offset, topic_name.c_str(), topic_name_len);
-        offset += topic_name_len;
+        // topic_authorized_operations INT32 (4字节) - 0
+        int32_t auth_ops = htonl(0);
+        memcpy(response + offset, &auth_ops, 4);
+        offset += 4;
         
-        // topic_id UUID (16字节) - 全零
-        memset(response + offset, 0, 16);
-        offset += 16;
-        
-        // is_internal BOOLEAN (1字节) - false
+        // TAG_BUFFER（空）- topic 条目
         response[offset++] = 0;
-        
-        // partitions COMPACT_ARRAY - 空数组
-        response[offset++] = 1;
     }
-    
-    // topic_authorized_operations INT32 (4字节) - 0
-    int32_t auth_ops = htonl(0);
-    memcpy(response + offset, &auth_ops, 4);
-    offset += 4;
-    
-    // TAG_BUFFER（空）- topic 条目
-    response[offset++] = 0;
     
     // next_cursor NULLABLE_INT8 - -1 表示 null
     response[offset++] = 0xff;

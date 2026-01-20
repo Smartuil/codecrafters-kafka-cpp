@@ -75,21 +75,37 @@ void handle_client(int client_fd)
         
         // api_keys COMPACT_ARRAY
         // COMPACT_ARRAY 长度编码为 unsigned varint，值为 N+1（N 为实际数量）
-        // 我们有 1 个条目，所以长度 = 1 + 1 = 2
-        uint8_t array_length = 2;  // 1 个元素 + 1
+        // 我们有 2 个条目，所以长度 = 2 + 1 = 3
+        uint8_t array_length = 3;  // 2 个元素 + 1
         response[offset++] = array_length;
         
         // ApiVersions 条目 (api_key = 18)
-        int16_t api_key = htons(18);
-        memcpy(response + offset, &api_key, 2);
+        int16_t api_key_1 = htons(18);
+        memcpy(response + offset, &api_key_1, 2);
         offset += 2;
         
-        int16_t min_version = htons(0);
-        memcpy(response + offset, &min_version, 2);
+        int16_t min_version_1 = htons(0);
+        memcpy(response + offset, &min_version_1, 2);
         offset += 2;
         
-        int16_t max_version = htons(4);
-        memcpy(response + offset, &max_version, 2);
+        int16_t max_version_1 = htons(4);
+        memcpy(response + offset, &max_version_1, 2);
+        offset += 2;
+        
+        // api_key 条目的 TAG_BUFFER（空）
+        response[offset++] = 0;
+        
+        // DescribeTopicPartitions 条目 (api_key = 75)
+        int16_t api_key_2 = htons(75);
+        memcpy(response + offset, &api_key_2, 2);
+        offset += 2;
+        
+        int16_t min_version_2 = htons(0);
+        memcpy(response + offset, &min_version_2, 2);
+        offset += 2;
+        
+        int16_t max_version_2 = htons(0);
+        memcpy(response + offset, &max_version_2, 2);
         offset += 2;
         
         // api_key 条目的 TAG_BUFFER（空）

@@ -105,20 +105,22 @@ void handle_describe_topic_partitions(int client_fd, int32_t correlation_id, cha
 {
     // 解析请求体，获取 topic_name
     // 请求头 v2 结构:
-    //   message_size (4) + api_key (2) + api_version (2) + correlation_id (4) + client_id (COMPACT_STRING) + TAG_BUFFER
+    //   message_size (4) + api_key (2) + api_version (2) + correlation_id (4) 
+    //   + client_id (NULLABLE_STRING: 2字节长度 + 内容) + TAG_BUFFER
     // 请求体:
     //   topics COMPACT_ARRAY + ...
     
-    // 跳过请求头，找到请求体
-    // 偏移量从 message_size 之后开始: 4 + 2 + 2 + 4 = 12
+    // 跳过请求头固定部分: 4 + 2 + 2 + 4 = 12
     int req_offset = 12;
     
-    // 跳过 client_id (COMPACT_STRING: 长度为 N+1 编码)
-    uint8_t client_id_len = static_cast<uint8_t>(buffer[req_offset]);
-    req_offset += 1;
-    if (client_id_len > 1)
+    // 跳过 client_id (NULLABLE_STRING: 2字节长度前缀)
+    int16_t client_id_len_net;
+    memcpy(&client_id_len_net, buffer + req_offset, 2);
+    int16_t client_id_len = ntohs(client_id_len_net);
+    req_offset += 2;
+    if (client_id_len > 0)
     {
-        req_offset += (client_id_len - 1);  // 实际长度 = N+1 - 1 = N
+        req_offset += client_id_len;
     }
     
     // 跳过请求头的 TAG_BUFFER

@@ -637,10 +637,15 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
     req_offset += 1;
     int num_topics = topics_array_len - 1;
     
-    // 读取所有请求的 topic_ids
+    // 读取所有请求的 topic_ids 和 partition 信息
+    struct FetchPartitionRequest
+    {
+        int32_t partition_index;
+    };
     struct FetchTopicRequest
     {
         char topic_id[16];
+        std::vector<FetchPartitionRequest> partitions;
     };
     std::vector<FetchTopicRequest> requested_topics;
     
@@ -649,34 +654,37 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
         FetchTopicRequest topic_req;
         // topic_id UUID (16 字节)
         memcpy(topic_req.topic_id, buffer + req_offset, 16);
-        requested_topics.push_back(topic_req);
         req_offset += 16;
         
-        // partitions COMPACT_ARRAY: 跳过
+        // partitions COMPACT_ARRAY
         uint8_t partitions_len = static_cast<uint8_t>(buffer[req_offset]);
         req_offset += 1;
         int num_partitions = partitions_len - 1;
         
-        // 每个 partition 条目: partition (4) + current_leader_epoch (4) + fetch_offset (8)
-        //                     + last_fetched_epoch (4) + log_start_offset (8) + partition_max_bytes (4)
-        //                     + TAG_BUFFER (1) = 33 字节
-        req_offset += num_partitions * 33;
+        for (int p = 0; p < num_partitions; p++)
+        {
+            FetchPartitionRequest part_req;
+            // partition (4 字节)
+            int32_t part_idx_net;
+            memcpy(&part_idx_net, buffer + req_offset, 4);
+            part_req.partition_index = ntohl(part_idx_net);
+            req_offset += 4;
+            
+            // 跳过: current_leader_epoch (4) + fetch_offset (8) + last_fetched_epoch (4)
+            //       + log_start_offset (8) + partition_max_bytes (4) + TAG_BUFFER (1) = 29 字节
+            req_offset += 29;
+            
+            topic_req.partitions.push_back(part_req);
+        }
         
         // 跳过 topic 的 TAG_BUFFER
         req_offset += 1;
+        
+        requested_topics.push_back(topic_req);
     }
     
-    // 构建响应
-    // Fetch Response v16 结构:
-    //   Response Header v1: correlation_id (4字节) + TAG_BUFFER (1字节)
-    //   Body:
-    //     throttle_time_ms (4字节)
-    //     error_code (2字节)
-    //     session_id (4字节)
-    //     responses COMPACT_ARRAY
-    //     TAG_BUFFER (1字节)
-    
-    char response[4096];
+    // 构建响应 - 使用动态缓冲区
+    std::vector<char> response(65536);
     int offset = 0;
     
     // 先跳过 message_size (4字节)，最后再填充
@@ -684,7 +692,7 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
     
     // Response Header v1
     // correlation_id (4字节) - 已经是网络字节序
-    memcpy(response + offset, &correlation_id, 4);
+    memcpy(response.data() + offset, &correlation_id, 4);
     offset += 4;
     
     // TAG_BUFFER（空）- response header v1 特有
@@ -693,17 +701,17 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
     // Response Body
     // throttle_time_ms (4字节)
     int32_t throttle_time_ms = htonl(0);
-    memcpy(response + offset, &throttle_time_ms, 4);
+    memcpy(response.data() + offset, &throttle_time_ms, 4);
     offset += 4;
     
     // error_code (2字节) - 0 = NO_ERROR
     int16_t error_code = htons(0);
-    memcpy(response + offset, &error_code, 2);
+    memcpy(response.data() + offset, &error_code, 2);
     offset += 2;
     
     // session_id (4字节) - 0
     int32_t session_id = htonl(0);
-    memcpy(response + offset, &session_id, 4);
+    memcpy(response.data() + offset, &session_id, 4);
     offset += 4;
     
     // responses COMPACT_ARRAY
@@ -711,9 +719,10 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
     
     for (const auto& topic_req : requested_topics)
     {
-        // 检查 topic_id 是否存在
+        // 检查 topic_id 是否存在，并获取 topic_name
         std::string topic_uuid_hex = uuid_to_hex(topic_req.topic_id);
         bool topic_exists = false;
+        std::string topic_name;
         
         // 在 g_topics 中查找匹配的 topic_id
         for (const auto& topic_pair : g_topics)
@@ -722,56 +731,111 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
             if (stored_uuid_hex == topic_uuid_hex)
             {
                 topic_exists = true;
+                topic_name = topic_pair.first;
                 break;
             }
         }
         
         // topic_id UUID (16字节)
-        memcpy(response + offset, topic_req.topic_id, 16);
+        memcpy(response.data() + offset, topic_req.topic_id, 16);
         offset += 16;
         
-        // partitions COMPACT_ARRAY - 1 个元素
-        response[offset++] = 2;  // 1 + 1
+        // partitions COMPACT_ARRAY
+        response[offset++] = static_cast<uint8_t>(topic_req.partitions.size() + 1);
         
-        // partition 条目
-        // partition_index (4字节) - 0
-        int32_t partition_index = htonl(0);
-        memcpy(response + offset, &partition_index, 4);
-        offset += 4;
-        
-        // error_code (2字节) - 0 = NO_ERROR 或 100 = UNKNOWN_TOPIC_ID
-        int16_t part_error = htons(topic_exists ? 0 : 100);
-        memcpy(response + offset, &part_error, 2);
-        offset += 2;
-        
-        // high_watermark (8字节) - 0
-        int64_t high_watermark = 0;
-        memcpy(response + offset, &high_watermark, 8);
-        offset += 8;
-        
-        // last_stable_offset (8字节) - 0
-        int64_t last_stable_offset = 0;
-        memcpy(response + offset, &last_stable_offset, 8);
-        offset += 8;
-        
-        // log_start_offset (8字节) - 0
-        int64_t log_start_offset = 0;
-        memcpy(response + offset, &log_start_offset, 8);
-        offset += 8;
-        
-        // aborted_transactions COMPACT_ARRAY - 空数组
-        response[offset++] = 1;
-        
-        // preferred_read_replica (4字节) - -1
-        int32_t preferred_read_replica = htonl(-1);
-        memcpy(response + offset, &preferred_read_replica, 4);
-        offset += 4;
-        
-        // records COMPACT_NULLABLE_BYTES - null (空记录)
-        response[offset++] = 0;
-        
-        // TAG_BUFFER（空）- partition 条目
-        response[offset++] = 0;
+        for (const auto& part_req : topic_req.partitions)
+        {
+            // partition_index (4字节)
+            int32_t partition_index = htonl(part_req.partition_index);
+            memcpy(response.data() + offset, &partition_index, 4);
+            offset += 4;
+            
+            // 读取日志文件（如果 topic 存在）
+            std::vector<char> records_data;
+            if (topic_exists)
+            {
+                // 构建日志文件路径: /tmp/kraft-combined-logs/{topic_name}-{partition}/00000000000000000000.log
+                std::string log_path = "/tmp/kraft-combined-logs/" + topic_name + "-" + 
+                                       std::to_string(part_req.partition_index) + "/00000000000000000000.log";
+                
+                std::ifstream log_file(log_path, std::ios::binary);
+                if (log_file.is_open())
+                {
+                    log_file.seekg(0, std::ios::end);
+                    size_t file_size = log_file.tellg();
+                    log_file.seekg(0, std::ios::beg);
+                    
+                    if (file_size > 0)
+                    {
+                        records_data.resize(file_size);
+                        log_file.read(records_data.data(), file_size);
+                    }
+                    log_file.close();
+                }
+            }
+            
+            // error_code (2字节) - 0 = NO_ERROR 或 100 = UNKNOWN_TOPIC_ID
+            int16_t part_error = htons(topic_exists ? 0 : 100);
+            memcpy(response.data() + offset, &part_error, 2);
+            offset += 2;
+            
+            // high_watermark (8字节) - 0
+            int64_t high_watermark = 0;
+            memcpy(response.data() + offset, &high_watermark, 8);
+            offset += 8;
+            
+            // last_stable_offset (8字节) - 0
+            int64_t last_stable_offset = 0;
+            memcpy(response.data() + offset, &last_stable_offset, 8);
+            offset += 8;
+            
+            // log_start_offset (8字节) - 0
+            int64_t log_start_offset = 0;
+            memcpy(response.data() + offset, &log_start_offset, 8);
+            offset += 8;
+            
+            // aborted_transactions COMPACT_ARRAY - 空数组
+            response[offset++] = 1;
+            
+            // preferred_read_replica (4字节) - -1
+            int32_t preferred_read_replica = htonl(-1);
+            memcpy(response.data() + offset, &preferred_read_replica, 4);
+            offset += 4;
+            
+            // records COMPACT_NULLABLE_BYTES
+            if (records_data.empty())
+            {
+                // null 或空记录
+                response[offset++] = 0;
+            }
+            else
+            {
+                // 写入 records 长度 (unsigned varint, N+1)
+                size_t records_len = records_data.size();
+                size_t len_to_write = records_len + 1;  // COMPACT encoding: length + 1
+                
+                // 编码 unsigned varint
+                while (len_to_write >= 0x80)
+                {
+                    response[offset++] = static_cast<char>((len_to_write & 0x7F) | 0x80);
+                    len_to_write >>= 7;
+                }
+                response[offset++] = static_cast<char>(len_to_write);
+                
+                // 确保缓冲区足够大
+                if (offset + records_data.size() > response.size())
+                {
+                    response.resize(offset + records_data.size() + 1024);
+                }
+                
+                // 写入 records 数据
+                memcpy(response.data() + offset, records_data.data(), records_data.size());
+                offset += records_data.size();
+            }
+            
+            // TAG_BUFFER（空）- partition 条目
+            response[offset++] = 0;
+        }
         
         // TAG_BUFFER（空）- topic 条目
         response[offset++] = 0;
@@ -782,10 +846,10 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
     
     // 现在填充 message_size
     int32_t message_size = htonl(offset - 4);
-    memcpy(response, &message_size, 4);
+    memcpy(response.data(), &message_size, 4);
     
     // 发送完整响应
-    send(client_fd, response, offset, 0);
+    send(client_fd, response.data(), offset, 0);
 }
 
 // 处理单个客户端连接的函数

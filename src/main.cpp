@@ -711,6 +711,21 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
     
     for (const auto& topic_req : requested_topics)
     {
+        // 检查 topic_id 是否存在
+        std::string topic_uuid_hex = uuid_to_hex(topic_req.topic_id);
+        bool topic_exists = false;
+        
+        // 在 g_topics 中查找匹配的 topic_id
+        for (const auto& topic_pair : g_topics)
+        {
+            std::string stored_uuid_hex = uuid_to_hex(topic_pair.second.uuid);
+            if (stored_uuid_hex == topic_uuid_hex)
+            {
+                topic_exists = true;
+                break;
+            }
+        }
+        
         // topic_id UUID (16字节)
         memcpy(response + offset, topic_req.topic_id, 16);
         offset += 16;
@@ -724,8 +739,8 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
         memcpy(response + offset, &partition_index, 4);
         offset += 4;
         
-        // error_code (2字节) - 100 = UNKNOWN_TOPIC_ID
-        int16_t part_error = htons(100);
+        // error_code (2字节) - 0 = NO_ERROR 或 100 = UNKNOWN_TOPIC_ID
+        int16_t part_error = htons(topic_exists ? 0 : 100);
         memcpy(response + offset, &part_error, 2);
         offset += 2;
         
@@ -752,7 +767,7 @@ void handle_fetch(int client_fd, int32_t correlation_id, char* buffer, ssize_t b
         memcpy(response + offset, &preferred_read_replica, 4);
         offset += 4;
         
-        // records COMPACT_NULLABLE_BYTES - null
+        // records COMPACT_NULLABLE_BYTES - null (空记录)
         response[offset++] = 0;
         
         // TAG_BUFFER（空）- partition 条目

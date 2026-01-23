@@ -600,6 +600,62 @@ void handle_describe_topic_partitions(int client_fd, int32_t correlation_id, cha
     send(client_fd, response, offset, 0);
 }
 
+// 处理 Fetch 请求
+void handle_fetch(int client_fd, int32_t correlation_id)
+{
+    // Fetch Response v16 结构:
+    //   Response Header v1: correlation_id (4字节) + TAG_BUFFER (1字节)
+    //   Body:
+    //     throttle_time_ms (4字节)
+    //     error_code (2字节)
+    //     session_id (4字节)
+    //     responses COMPACT_ARRAY - 空数组
+    //     TAG_BUFFER (1字节)
+    
+    char response[256];
+    int offset = 0;
+    
+    // 先跳过 message_size (4字节)，最后再填充
+    offset = 4;
+    
+    // Response Header v1
+    // correlation_id (4字节) - 已经是网络字节序
+    memcpy(response + offset, &correlation_id, 4);
+    offset += 4;
+    
+    // TAG_BUFFER（空）- response header v1 特有
+    response[offset++] = 0;
+    
+    // Response Body
+    // throttle_time_ms (4字节)
+    int32_t throttle_time_ms = htonl(0);
+    memcpy(response + offset, &throttle_time_ms, 4);
+    offset += 4;
+    
+    // error_code (2字节) - 0 = NO_ERROR
+    int16_t error_code = htons(0);
+    memcpy(response + offset, &error_code, 2);
+    offset += 2;
+    
+    // session_id (4字节) - 0
+    int32_t session_id = htonl(0);
+    memcpy(response + offset, &session_id, 4);
+    offset += 4;
+    
+    // responses COMPACT_ARRAY - 空数组，长度 = 0 + 1 = 1
+    response[offset++] = 1;
+    
+    // TAG_BUFFER（空）- response body
+    response[offset++] = 0;
+    
+    // 现在填充 message_size
+    int32_t message_size = htonl(offset - 4);
+    memcpy(response, &message_size, 4);
+    
+    // 发送完整响应
+    send(client_fd, response, offset, 0);
+}
+
 // 处理单个客户端连接的函数
 void handle_client(int client_fd)
 {
@@ -636,7 +692,12 @@ void handle_client(int client_fd)
         // correlation_id 已经是网络字节序（大端），回显时无需转换
         
         // 根据 api_key 分发处理
-        if (request_api_key == 18)
+        if (request_api_key == 1)
+        {
+            // Fetch
+            handle_fetch(client_fd, correlation_id);
+        }
+        else if (request_api_key == 18)
         {
             // ApiVersions
             handle_api_versions(client_fd, correlation_id, request_api_version);

@@ -1014,6 +1014,17 @@ void handle_produce(int client_fd, int32_t correlation_id, char* buffer, ssize_t
     
     for (const auto& topic_req : requested_topics)
     {
+        // 检查 topic 是否存在
+        bool topic_exists = false;
+        std::string topic_uuid_hex;
+        
+        auto it = g_topics.find(topic_req.topic_name);
+        if (it != g_topics.end() && it->second.found)
+        {
+            topic_exists = true;
+            topic_uuid_hex = uuid_to_hex(it->second.uuid);
+        }
+        
         // name COMPACT_STRING
         response[offset++] = static_cast<uint8_t>(topic_req.topic_name.size() + 1);
         memcpy(response + offset, topic_req.topic_name.c_str(), topic_req.topic_name.size());
@@ -1024,30 +1035,75 @@ void handle_produce(int client_fd, int32_t correlation_id, char* buffer, ssize_t
         
         for (const auto& part_req : topic_req.partitions)
         {
+            // 检查 partition 是否存在
+            bool partition_exists = false;
+            if (topic_exists)
+            {
+                auto pit = g_partitions.find(topic_uuid_hex);
+                if (pit != g_partitions.end())
+                {
+                    for (const auto& pinfo : pit->second)
+                    {
+                        if (pinfo.partition_index == part_req.partition_index)
+                        {
+                            partition_exists = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
             // index (4字节)
             int32_t part_idx = htonl(part_req.partition_index);
             memcpy(response + offset, &part_idx, 4);
             offset += 4;
             
-            // error_code (2字节) - 3 = UNKNOWN_TOPIC_OR_PARTITION
-            int16_t error_code = htons(3);
-            memcpy(response + offset, &error_code, 2);
-            offset += 2;
-            
-            // base_offset (8字节) - -1
-            int64_t base_offset = __builtin_bswap64(-1);
-            memcpy(response + offset, &base_offset, 8);
-            offset += 8;
-            
-            // log_append_time_ms (8字节) - -1
-            int64_t log_append_time = __builtin_bswap64(-1);
-            memcpy(response + offset, &log_append_time, 8);
-            offset += 8;
-            
-            // log_start_offset (8字节) - -1
-            int64_t log_start_offset = __builtin_bswap64(-1);
-            memcpy(response + offset, &log_start_offset, 8);
-            offset += 8;
+            if (topic_exists && partition_exists)
+            {
+                // 成功响应
+                // error_code (2字节) - 0 = NO_ERROR
+                int16_t error_code = htons(0);
+                memcpy(response + offset, &error_code, 2);
+                offset += 2;
+                
+                // base_offset (8字节) - 0 (第一条记录)
+                int64_t base_offset = 0;
+                memcpy(response + offset, &base_offset, 8);
+                offset += 8;
+                
+                // log_append_time_ms (8字节) - -1
+                int64_t log_append_time = __builtin_bswap64(-1);
+                memcpy(response + offset, &log_append_time, 8);
+                offset += 8;
+                
+                // log_start_offset (8字节) - 0
+                int64_t log_start_offset = 0;
+                memcpy(response + offset, &log_start_offset, 8);
+                offset += 8;
+            }
+            else
+            {
+                // 错误响应
+                // error_code (2字节) - 3 = UNKNOWN_TOPIC_OR_PARTITION
+                int16_t error_code = htons(3);
+                memcpy(response + offset, &error_code, 2);
+                offset += 2;
+                
+                // base_offset (8字节) - -1
+                int64_t base_offset = __builtin_bswap64(-1);
+                memcpy(response + offset, &base_offset, 8);
+                offset += 8;
+                
+                // log_append_time_ms (8字节) - -1
+                int64_t log_append_time = __builtin_bswap64(-1);
+                memcpy(response + offset, &log_append_time, 8);
+                offset += 8;
+                
+                // log_start_offset (8字节) - -1
+                int64_t log_start_offset = __builtin_bswap64(-1);
+                memcpy(response + offset, &log_start_offset, 8);
+                offset += 8;
+            }
             
             // record_errors COMPACT_ARRAY - 空数组
             response[offset++] = 1;

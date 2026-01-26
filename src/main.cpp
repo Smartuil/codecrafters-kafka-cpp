@@ -304,9 +304,25 @@ void handle_api_versions(int client_fd, int32_t correlation_id, int16_t request_
     
     // api_keys COMPACT_ARRAY
     // COMPACT_ARRAY 长度编码为 unsigned varint，值为 N+1（N 为实际数量）
-    // 我们有 3 个条目，所以长度 = 3 + 1 = 4
-    uint8_t array_length = 4;  // 3 个元素 + 1
+    // 我们有 4 个条目，所以长度 = 4 + 1 = 5
+    uint8_t array_length = 5;  // 4 个元素 + 1
     response[offset++] = array_length;
+    
+    // Produce 条目 (api_key = 0)
+    int16_t api_key_produce = htons(0);
+    memcpy(response + offset, &api_key_produce, 2);
+    offset += 2;
+    
+    int16_t min_version_produce = htons(0);
+    memcpy(response + offset, &min_version_produce, 2);
+    offset += 2;
+    
+    int16_t max_version_produce = htons(11);
+    memcpy(response + offset, &max_version_produce, 2);
+    offset += 2;
+    
+    // api_key 条目的 TAG_BUFFER（空）
+    response[offset++] = 0;
     
     // Fetch 条目 (api_key = 1)
     int16_t api_key_fetch = htons(1);

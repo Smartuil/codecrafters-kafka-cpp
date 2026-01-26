@@ -916,6 +916,7 @@ void handle_produce(int client_fd, int32_t correlation_id, char* buffer, ssize_t
     struct ProducePartitionRequest
     {
         int32_t partition_index;
+        std::vector<char> records_data;  // 保存 RecordBatch 数据
     };
     struct ProduceTopicRequest
     {
@@ -948,7 +949,7 @@ void handle_produce(int client_fd, int32_t correlation_id, char* buffer, ssize_t
             part_req.partition_index = ntohl(part_idx_net);
             req_offset += 4;
             
-            // records COMPACT_NULLABLE_BYTES - 跳过
+            // records COMPACT_NULLABLE_BYTES
             uint8_t first_byte = static_cast<uint8_t>(buffer[req_offset]);
             if (first_byte == 0)
             {
@@ -971,6 +972,10 @@ void handle_produce(int client_fd, int32_t correlation_id, char* buffer, ssize_t
                     shift += 7;
                 }
                 records_len -= 1;  // COMPACT encoding
+                
+                // 保存 records 数据
+                part_req.records_data.resize(records_len);
+                memcpy(part_req.records_data.data(), buffer + req_offset, records_len);
                 req_offset += records_len;
             }
             
@@ -1060,6 +1065,20 @@ void handle_produce(int client_fd, int32_t correlation_id, char* buffer, ssize_t
             
             if (topic_exists && partition_exists)
             {
+                // 将 records 写入日志文件
+                if (!part_req.records_data.empty())
+                {
+                    std::string log_path = "/tmp/kraft-combined-logs/" + topic_req.topic_name + "-" +
+                                           std::to_string(part_req.partition_index) + "/00000000000000000000.log";
+                    
+                    std::ofstream log_file(log_path, std::ios::binary | std::ios::app);
+                    if (log_file.is_open())
+                    {
+                        log_file.write(part_req.records_data.data(), part_req.records_data.size());
+                        log_file.close();
+                    }
+                }
+                
                 // 成功响应
                 // error_code (2字节) - 0 = NO_ERROR
                 int16_t error_code = htons(0);
